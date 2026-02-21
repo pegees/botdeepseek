@@ -12,6 +12,10 @@ Commands:
   /status     - Bot health check
   /autoscan   - Auto-scan every 15 min
   /leverage   - Set leverage for gain calculation
+  /ask        - Chat with DeepSeek AI
+  /clear      - Clear chat history
+  /prompt     - Customize scan instructions
+  /resetprompt - Reset to default prompt
 """
 import os
 import re
@@ -82,6 +86,10 @@ last_scan_time = None
 is_scanning = False
 user_leverage = DEFAULT_LEVERAGE
 df_cache = {}  # Cache dataframes for chart generation
+
+# DeepSeek chat state
+deepseek_chat_history = []  # Conversation memory for /ask
+custom_trading_prompt = ""  # User's custom instructions for scan prompt
 
 
 def get_exchange():
@@ -563,6 +571,7 @@ RULES:
 - Skip ATR < 0.3%
 - Pay attention to chart patterns - they add confluence
 - If nothing good: say "NO SETUP - WAIT"
+{f'{chr(10)}ADDITIONAL USER INSTRUCTIONS:{chr(10)}{custom_trading_prompt}' if custom_trading_prompt else ''}
 
 Be concise. Format clearly."""
     return prompt
@@ -717,15 +726,21 @@ async def send_with_chart(chat_id, text, chart_path):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.reply(
-        "SCALP SCANNER BOT\n\n"
-        "Commands:\n"
+        "🤖 SCALP SCANNER BOT\n\n"
+        "📊 SCANNING:\n"
         "/scan - Full market scan (top 30)\n"
         "/scan BTC - Deep scan single pair\n"
         "/scan meme - Volatile pairs only\n"
         "/top - Quick top 10 movers\n"
-        "/status - Bot health check\n"
+        "/autoscan on/off - Auto-scan every 15 min\n\n"
+        "💬 DEEPSEEK CHAT:\n"
+        "/ask <question> - Chat with DeepSeek AI\n"
+        "/clear - Clear chat history\n\n"
+        "⚙️ SETTINGS:\n"
+        "/prompt <text> - Customize scan instructions\n"
+        "/resetprompt - Reset to default\n"
         "/leverage - Set leverage (default 50x)\n"
-        "/autoscan on/off - Auto-scan every 15 min"
+        "/status - Bot health check"
     )
 
 
@@ -851,6 +866,117 @@ async def cmd_autoscan(message: types.Message, command: CommandObject):
 
     else:
         await message.reply(f"Auto-scan: {'ON' if autoscan_enabled else 'OFF'}\nUse /autoscan on or /autoscan off")
+
+
+# ============================================
+# DEEPSEEK CHAT & PROMPT COMMANDS
+# ============================================
+
+@dp.message(Command("ask"))
+async def cmd_ask(message: types.Message, command: CommandObject):
+    """Chat directly with DeepSeek AI"""
+    global deepseek_chat_history
+
+    question = (command.args or "").strip()
+    if not question:
+        await message.reply(
+            "💬 CHAT WITH DEEPSEEK\n\n"
+            "Ask anything about crypto, trading, markets:\n"
+            "/ask what's a good SL strategy for scalping?\n"
+            "/ask explain bull flag pattern\n"
+            "/ask is RSI 72 overbought for BTC?\n\n"
+            "/clear - Clear chat history"
+        )
+        return
+
+    await message.reply("🤔 Thinking...")
+
+    # Build conversation with history (keep last 10 messages)
+    deepseek_chat_history.append({"role": "user", "content": question})
+    if len(deepseek_chat_history) > 20:
+        deepseek_chat_history = deepseek_chat_history[-20:]
+
+    try:
+        url = "https://api.deepseek.com/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": (
+                    "You are an expert crypto trading assistant. "
+                    "You specialize in 15-minute scalp trading, technical analysis, "
+                    "risk management, and leverage trading. "
+                    "Be concise but thorough. Use examples when helpful."
+                )},
+                *deepseek_chat_history
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.5
+        }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        if response.status_code != 200:
+            await message.reply(f"DeepSeek error: {response.status_code}")
+            return
+
+        reply = response.json()["choices"][0]["message"]["content"]
+        deepseek_chat_history.append({"role": "assistant", "content": reply})
+
+        # Send in chunks if long
+        chunks = [reply[i:i+4000] for i in range(0, len(reply), 4000)]
+        for chunk in chunks:
+            await message.reply(chunk)
+            await asyncio.sleep(0.3)
+
+    except Exception as e:
+        await message.reply(f"Error: {e}")
+
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: types.Message):
+    """Clear DeepSeek chat history"""
+    global deepseek_chat_history
+    deepseek_chat_history = []
+    await message.reply("💬 Chat history cleared.")
+
+
+@dp.message(Command("prompt"))
+async def cmd_prompt(message: types.Message, command: CommandObject):
+    """Modify DeepSeek's trading instructions for scans"""
+    global custom_trading_prompt
+
+    args = (command.args or "").strip()
+
+    if not args:
+        current = custom_trading_prompt if custom_trading_prompt else "(default - no custom instructions)"
+        await message.reply(
+            f"📝 CUSTOM SCAN PROMPT\n\n"
+            f"Current instructions:\n{current}\n\n"
+            f"Examples:\n"
+            f"/prompt SL must be tight, max 1% from entry\n"
+            f"/prompt only show LONG setups\n"
+            f"/prompt focus on BTC ETH SOL only\n"
+            f"/prompt risk:reward minimum 1:3\n"
+            f"/prompt prefer patterns with >70% confidence\n\n"
+            f"/resetprompt - Remove custom instructions"
+        )
+        return
+
+    custom_trading_prompt = args
+    await message.reply(
+        f"✅ Custom instructions set!\n\n"
+        f"DeepSeek will now follow:\n\"{custom_trading_prompt}\"\n\n"
+        f"This applies to all future /scan commands.\n"
+        f"Use /resetprompt to remove."
+    )
+
+
+@dp.message(Command("resetprompt"))
+async def cmd_resetprompt(message: types.Message):
+    """Reset custom prompt to default"""
+    global custom_trading_prompt
+    custom_trading_prompt = ""
+    await message.reply("✅ Custom instructions removed. Using default scan prompt.")
 
 
 async def auto_scan_job():

@@ -89,6 +89,15 @@ def get_exchange():
     config = {
         "enableRateLimit": True,
         "timeout": 30000,
+        "urls": {
+            "api": {
+                "public": "https://api.binance.me/api/v3",
+                "private": "https://api.binance.me/api/v3",
+                "v1": "https://api.binance.me/api/v1",
+                "v3": "https://api.binance.me/api/v3",
+                "sapi": "https://api.binance.me/sapi/v1",
+            }
+        },
         "options": {
             "defaultType": "spot",
             "fetchCurrencies": False,

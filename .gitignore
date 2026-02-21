@@ -1,0 +1,32 @@
+# Environment files with secrets - NEVER push these
+API_KEYS.env
+.env
+*.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated charts
+*.png
+
+# Logs
+*.log

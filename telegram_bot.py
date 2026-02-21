@@ -987,6 +987,73 @@ async def cmd_resetprompt(message: types.Message):
     await message.reply("✅ Custom instructions removed. Using default scan prompt.")
 
 
+@dp.message()
+async def catch_all(message: types.Message):
+    """Catch any unhandled messages"""
+    text = (message.text or "").strip()
+    logger.info(f"Unhandled message: {text}")
+
+    # Handle /ask manually if Command filter didn't catch it
+    if text.lower().startswith("/ask"):
+        question = text[4:].strip()
+        if question.startswith("@"):
+            question = question.split(" ", 1)[1] if " " in question else ""
+        question = question.strip()
+
+        if not question:
+            await message.reply(
+                "CHAT WITH DEEPSEEK\n\n"
+                "Usage: /ask <your question>\n"
+                "Example: /ask what's a good SL for scalping?"
+            )
+            return
+
+        await message.reply("Thinking...")
+
+        global deepseek_chat_history
+        deepseek_chat_history.append({"role": "user", "content": question})
+        if len(deepseek_chat_history) > 20:
+            deepseek_chat_history = deepseek_chat_history[-20:]
+
+        try:
+            def blocking_ask():
+                url = "https://api.deepseek.com/chat/completions"
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+                payload = {
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": (
+                            "You are an expert crypto trading assistant. "
+                            "You specialize in 15-minute scalp trading, technical analysis, "
+                            "risk management, and leverage trading. "
+                            "Be concise but thorough. Use examples when helpful."
+                        )},
+                        *deepseek_chat_history
+                    ],
+                    "max_tokens": 2000,
+                    "temperature": 0.5
+                }
+                return requests.post(url, headers=headers, json=payload, timeout=60)
+
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(executor, blocking_ask)
+
+            if response.status_code != 200:
+                await message.reply(f"DeepSeek error: {response.status_code}")
+                return
+
+            reply = response.json()["choices"][0]["message"]["content"]
+            deepseek_chat_history.append({"role": "assistant", "content": reply})
+
+            chunks = [reply[i:i+4000] for i in range(0, len(reply), 4000)]
+            for chunk in chunks:
+                await message.reply(chunk)
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.error(f"ASK error: {e}")
+            await message.reply(f"Error: {e}")
+
+
 async def auto_scan_job():
     """Auto-scan every 15 min"""
     if not autoscan_enabled or not TELEGRAM_CHAT_ID:

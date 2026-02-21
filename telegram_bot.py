@@ -987,6 +987,15 @@ async def cmd_resetprompt(message: types.Message):
     await message.reply("✅ Custom instructions removed. Using default scan prompt.")
 
 
+@dp.edited_message()
+async def handle_edited(message: types.Message):
+    """Handle edited messages as if they were new"""
+    text = (message.text or "").strip()
+    logger.info(f"Edited message: {text}")
+    if text.startswith("/"):
+        await catch_all(message)
+
+
 @dp.message()
 async def catch_all(message: types.Message):
     """Catch any unhandled messages"""
@@ -1078,7 +1087,7 @@ async def main():
     print("Waiting for commands...")
     print("=" * 50)
 
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=["message", "edited_message"])
 
 
 if __name__ == "__main__":

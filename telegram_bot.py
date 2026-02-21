@@ -1076,6 +1076,13 @@ async def auto_scan_job():
         await send_with_chart(TELEGRAM_CHAT_ID, result, chart_path)
 
 
+@dp.update.outer_middleware()
+async def log_all_updates(handler, event, data):
+    """Log ALL incoming updates for debugging"""
+    logger.info(f"RAW UPDATE TYPE: {event.event_type}, UPDATE: {event.model_dump_json()[:500]}")
+    return await handler(event, data)
+
+
 async def main():
     scheduler.start()
 

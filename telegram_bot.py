@@ -80,6 +80,14 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 executor = ThreadPoolExecutor(max_workers=2)
 
+
+@dp.update.outer_middleware()
+async def log_all_updates(handler, event, data):
+    """Log ALL incoming updates for debugging"""
+    logger.info(f"RAW UPDATE: type={event.event_type} data={event.model_dump_json()[:300]}")
+    return await handler(event, data)
+
+
 # State
 autoscan_enabled = False
 last_scan_time = None
@@ -1074,13 +1082,6 @@ async def auto_scan_job():
     if has_setup:
         result = "AUTO-SCAN (15m candle)\n\n" + result
         await send_with_chart(TELEGRAM_CHAT_ID, result, chart_path)
-
-
-@dp.update.outer_middleware()
-async def log_all_updates(handler, event, data):
-    """Log ALL incoming updates for debugging"""
-    logger.info(f"RAW UPDATE TYPE: {event.event_type}, UPDATE: {event.model_dump_json()[:500]}")
-    return await handler(event, data)
 
 
 async def main():

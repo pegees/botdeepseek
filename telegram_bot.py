@@ -30,15 +30,23 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import FSInputFile
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Load API keys
+# Load API keys - from .env file locally, from environment on Railway
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / "API_KEYS.env")
+env_file = Path(__file__).parent / "API_KEYS.env"
+if env_file.exists():
+    load_dotenv(env_file)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+
+# Validate critical keys
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN not set! Add it to API_KEYS.env or Railway variables.")
+if not DEEPSEEK_API_KEY:
+    raise ValueError("DEEPSEEK_API_KEY not set!")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

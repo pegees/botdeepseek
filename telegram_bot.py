@@ -877,10 +877,12 @@ async def cmd_ask(message: types.Message, command: CommandObject):
     """Chat directly with DeepSeek AI"""
     global deepseek_chat_history
 
+    logger.info("ASK command received")
+
     question = (command.args or "").strip()
     if not question:
         await message.reply(
-            "💬 CHAT WITH DEEPSEEK\n\n"
+            "CHAT WITH DEEPSEEK\n\n"
             "Ask anything about crypto, trading, markets:\n"
             "/ask what's a good SL strategy for scalping?\n"
             "/ask explain bull flag pattern\n"
@@ -889,7 +891,7 @@ async def cmd_ask(message: types.Message, command: CommandObject):
         )
         return
 
-    await message.reply("🤔 Thinking...")
+    await message.reply("Thinking...")
 
     # Build conversation with history (keep last 10 messages)
     deepseek_chat_history.append({"role": "user", "content": question})
@@ -897,24 +899,29 @@ async def cmd_ask(message: types.Message, command: CommandObject):
         deepseek_chat_history = deepseek_chat_history[-20:]
 
     try:
-        url = "https://api.deepseek.com/chat/completions"
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
-        payload = {
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": (
-                    "You are an expert crypto trading assistant. "
-                    "You specialize in 15-minute scalp trading, technical analysis, "
-                    "risk management, and leverage trading. "
-                    "Be concise but thorough. Use examples when helpful."
-                )},
-                *deepseek_chat_history
-            ],
-            "max_tokens": 2000,
-            "temperature": 0.5
-        }
+        def blocking_ask():
+            url = "https://api.deepseek.com/chat/completions"
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+            payload = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": (
+                        "You are an expert crypto trading assistant. "
+                        "You specialize in 15-minute scalp trading, technical analysis, "
+                        "risk management, and leverage trading. "
+                        "Be concise but thorough. Use examples when helpful."
+                    )},
+                    *deepseek_chat_history
+                ],
+                "max_tokens": 2000,
+                "temperature": 0.5
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            return response
 
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(executor, blocking_ask)
+
         if response.status_code != 200:
             await message.reply(f"DeepSeek error: {response.status_code}")
             return
@@ -929,6 +936,7 @@ async def cmd_ask(message: types.Message, command: CommandObject):
             await asyncio.sleep(0.3)
 
     except Exception as e:
+        logger.error(f"ASK error: {e}")
         await message.reply(f"Error: {e}")
 
 

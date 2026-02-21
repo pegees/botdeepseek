@@ -1088,8 +1088,12 @@ async def main():
     scheduler.start()
 
     print("=" * 50)
-    print("TELEGRAM SCALP SCANNER BOT")
+    print("TELEGRAM SCALP SCANNER BOT v2.1")
     print("With: Chart Patterns + Leverage + Chart Images")
+    print("Commands: scan, top, status, autoscan, leverage")
+    print("DeepSeek: ask, clear, prompt, resetprompt")
+    print(f"Handlers registered: {len(dp.message.handlers)}")
+    print(f"Middleware registered: {len(dp.update.outer_middleware._middlewares) if hasattr(dp.update.outer_middleware, '_middlewares') else 'unknown'}")
     print("=" * 50)
     print(f"Leverage: {user_leverage}x")
     print("Waiting for commands...")

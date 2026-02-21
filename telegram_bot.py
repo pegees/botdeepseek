@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TELEGRAM SCALP SCANNER BOT
-==========================
-Chart patterns + Leverage gains + Chart images
+TELEGRAM SCALP SCANNER BOT v2.2
+================================
+Chart patterns + Leverage gains + Chart images + Edge Assessment
 
 Commands:
   /scan       - Full scan (top 30 pairs)
@@ -12,6 +12,9 @@ Commands:
   /status     - Bot health check
   /autoscan   - Auto-scan every 15 min
   /leverage   - Set leverage for gain calculation
+  /edge       - Edge assessment (top 5 pairs)
+  /edge BTC   - Edge for single pair
+  /ledger     - Virtual cost tracker
   /ask        - Chat with DeepSeek AI
   /clear      - Clear chat history
   /prompt     - Customize scan instructions
@@ -19,6 +22,7 @@ Commands:
 """
 import os
 import re
+import json
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -98,6 +102,11 @@ df_cache = {}  # Cache dataframes for chart generation
 # DeepSeek chat state
 deepseek_chat_history = []  # Conversation memory for /ask
 custom_trading_prompt = ""  # User's custom instructions for scan prompt
+
+# Edge assessment state
+virtual_ledger = {}  # {chat_id: {"total_cost": float, "call_count": int, "session_start": str}}
+is_edge_scanning = False
+VIRTUAL_COST_PER_CALL = 0.02
 
 
 def get_exchange():
@@ -306,6 +315,54 @@ At {leverage}x leverage:
 WARNING: {leverage}x = liquidation at ~{abs(round(1/leverage*100*0.95, 2))}% against you
 """
     return deepseek_result + leverage_section
+
+
+# ============================================
+# EDGE & KELLY CALCULATION
+# ============================================
+
+def calculate_kelly_and_edge(probability, tp_pct=2.0, sl_pct=1.0):
+    """
+    Calculate edge and Quarter-Kelly position size.
+    Edge = (p * Payout) - (1 - p)
+    Payout = TP / SL = 2.0
+    Quarter Kelly = (Edge / Payout) / 4
+    """
+    payout = tp_pct / sl_pct  # 2.0
+    edge = (probability * payout) - (1 - probability)
+
+    if edge <= 0 or probability < 0.60:
+        return {
+            "edge": round(edge, 4),
+            "signal_valid": False,
+            "kelly_full": 0.0,
+            "kelly_quarter": 0.0,
+            "kelly_pct_str": "0.0%"
+        }
+
+    kelly_full = edge / payout
+    kelly_quarter = kelly_full / 4
+
+    return {
+        "edge": round(edge, 4),
+        "signal_valid": True,
+        "kelly_full": round(kelly_full, 4),
+        "kelly_quarter": round(kelly_quarter, 4),
+        "kelly_pct_str": f"{kelly_quarter * 100:.1f}%"
+    }
+
+
+def record_virtual_cost(chat_id):
+    """Record a virtual API cost of $0.02"""
+    if chat_id not in virtual_ledger:
+        virtual_ledger[chat_id] = {
+            "total_cost": 0.0,
+            "call_count": 0,
+            "session_start": datetime.now(timezone.utc).isoformat()
+        }
+    virtual_ledger[chat_id]["total_cost"] += VIRTUAL_COST_PER_CALL
+    virtual_ledger[chat_id]["call_count"] += 1
+    return virtual_ledger[chat_id]
 
 
 # ============================================
@@ -615,6 +672,264 @@ def extract_pair_from_result(result):
     return match.group(1) if match else None
 
 
+# ============================================
+# EDGE ASSESSMENT ENGINE
+# ============================================
+
+EDGE_SYSTEM_PROMPT = (
+    "You are an Autonomous Risk Assessment Engine analyzing Binance market data to identify Edges (mispricings). "
+    "Your ONLY task: analyze the likelihood of the price hitting a +2% Take Profit (TP) versus a -1% Stop Loss (SL) within the next 4 hours. "
+    "You MUST provide a specific probability of success (p) between 0.00 and 1.00. "
+    "You MUST respond with ONLY valid JSON, no other text, no markdown code fences. "
+    'JSON format: {"signal": "LONG" or "SHORT" or "NONE", "probability": <float 0.00-1.00>, '
+    '"fair_price_estimate": <float>, "reasoning": "<brief 1-2 sentence explanation>"} '
+    "If no directional edge exists, set signal to NONE and probability to 0.50."
+)
+
+
+def build_edge_prompt(pair_data):
+    """Build compact prompt for edge probability estimation on a single pair"""
+    d = pair_data
+    return f"""PAIR: {d['symbol']}
+Price: {d['price']} | 24h Change: {d.get('change_24h', 0):.1f}% | 24h Volume: ${d.get('volume_24h', 0):,.0f}
+RSI(14): {d['rsi']} | EMA Stack: {d['ema_stack']} | EMA Cross: {d['ema_cross']}
+MACD: {d['macd_status']} | Bollinger: {d['bollinger_position']}
+Volume: {d['volume_status']} (ratio: {d['volume_ratio']:.1f}x) | ATR: {d['atr_pct']}%
+Chart Pattern: {d['chart_pattern']} (confidence: {d['pattern_confidence']}%, bias: {d['pattern_bias']})
+Pattern Detail: {d['pattern_description']}
+Support: {d['supports'][:2]} | Resistance: {d['resistances'][:2]}
+
+Analyze: What is the probability that price hits +2% (TP) before -1% (SL) within 4 hours?
+Consider trend alignment, momentum, volume confirmation, and pattern reliability.
+Respond with JSON only."""
+
+
+def parse_edge_response(raw_text):
+    """Parse JSON response from DeepSeek, with robust fallback"""
+    try:
+        # Strip markdown code fences if present
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+        data = json.loads(cleaned)
+
+        result = {
+            "signal": str(data.get("signal", "NONE")).upper(),
+            "probability": float(data.get("probability", 0.50)),
+            "fair_price_estimate": float(data.get("fair_price_estimate", 0)),
+            "reasoning": str(data.get("reasoning", "No reasoning provided")),
+            "raw_response": raw_text,
+            "parse_success": True
+        }
+
+        # Clamp probability
+        result["probability"] = max(0.0, min(1.0, result["probability"]))
+
+        # Validate signal
+        if result["signal"] not in ("LONG", "SHORT", "NONE"):
+            result["signal"] = "NONE"
+
+        return result
+
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.error(f"Failed to parse edge JSON: {e}\nRaw: {raw_text[:200]}")
+
+        # Fallback: regex extraction
+        prob_match = re.search(r'"probability"\s*:\s*([\d.]+)', raw_text)
+        signal_match = re.search(r'"signal"\s*:\s*"(LONG|SHORT|NONE)"', raw_text, re.IGNORECASE)
+        reason_match = re.search(r'"reasoning"\s*:\s*"([^"]+)"', raw_text)
+
+        return {
+            "signal": signal_match.group(1).upper() if signal_match else "NONE",
+            "probability": float(prob_match.group(1)) if prob_match else 0.50,
+            "fair_price_estimate": 0,
+            "reasoning": reason_match.group(1) if reason_match else "JSON parse failed",
+            "raw_response": raw_text,
+            "parse_success": False
+        }
+
+
+def ask_deepseek_edge(prompt):
+    """Call DeepSeek for edge assessment, expecting JSON response"""
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": EDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 300,
+        "temperature": 0.2
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
+    if response.status_code != 200:
+        logger.error(f"DeepSeek edge API error: {response.status_code}")
+        return None
+
+    raw_text = response.json()["choices"][0]["message"]["content"]
+    return parse_edge_response(raw_text)
+
+
+def blocking_edge_scan(specific_pair=None, top_n=5):
+    """Run edge assessment. Returns list of result dicts."""
+    global df_cache
+    df_cache = {}
+
+    results = []
+
+    if specific_pair:
+        symbol = specific_pair.upper()
+        if not symbol.endswith("/USDT"):
+            symbol = f"{symbol}/USDT"
+
+        analysis = analyze_pair(symbol)
+        if not analysis:
+            return [{"error": f"Could not analyze {symbol}"}]
+
+        analysis["volume_24h"] = 0
+        analysis["change_24h"] = 0
+
+        prompt = build_edge_prompt(analysis)
+        edge_response = ask_deepseek_edge(prompt)
+
+        if edge_response:
+            kelly = calculate_kelly_and_edge(edge_response["probability"])
+            results.append({
+                "symbol": symbol,
+                "analysis": analysis,
+                "edge": edge_response,
+                "kelly": kelly
+            })
+        else:
+            results.append({"error": f"DeepSeek returned no response for {symbol}"})
+    else:
+        # Scan all pairs, pick top_n by indicator strength
+        top_pairs = get_top_volume_pairs(TOP_PAIRS_TO_SCAN)
+        if not top_pairs:
+            return [{"error": "No pairs found"}]
+
+        all_data = scan_all_pairs(top_pairs)
+        if not all_data:
+            return [{"error": "Could not analyze any pairs"}]
+
+        # Score and rank pairs by indicator alignment
+        scored = []
+        for d in all_data:
+            score = 0
+            score += d.get("pattern_confidence", 0) / 100 * 30
+            if d.get("pattern_bias") in ("long", "short"):
+                score += 15
+            if "BULLISH" in d.get("ema_stack", "") or "BEARISH" in d.get("ema_stack", ""):
+                score += 15
+            if "BULLISH" in d.get("macd_status", "") or "BEARISH" in d.get("macd_status", ""):
+                score += 10
+            if "SPIKE" in d.get("volume_status", "") or "HIGH" in d.get("volume_status", ""):
+                score += 10
+            rsi = d.get("rsi", 50)
+            if isinstance(rsi, (int, float)) and (rsi < 35 or rsi > 65):
+                score += 10
+            if d.get("ema_cross") != "NONE":
+                score += 10
+            scored.append((score, d))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_candidates = [d for _, d in scored[:top_n]]
+
+        for d in top_candidates:
+            prompt = build_edge_prompt(d)
+            edge_response = ask_deepseek_edge(prompt)
+
+            if edge_response:
+                kelly = calculate_kelly_and_edge(edge_response["probability"])
+                results.append({
+                    "symbol": d["symbol"],
+                    "analysis": d,
+                    "edge": edge_response,
+                    "kelly": kelly
+                })
+            time.sleep(0.5)  # Rate limiting between API calls
+
+    return results
+
+
+def format_edge_results(results, chat_id):
+    """Format edge assessment results for Telegram"""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    ledger = virtual_ledger.get(chat_id, {"total_cost": 0.0, "call_count": 0})
+
+    lines = [
+        f"{'=' * 30}",
+        "EDGE ASSESSMENT",
+        f"{timestamp}",
+        f"{'=' * 30}",
+        ""
+    ]
+
+    valid_signals = 0
+
+    for r in results:
+        if "error" in r:
+            lines.append(f"Error: {r['error']}")
+            lines.append("")
+            continue
+
+        edge = r["edge"]
+        kelly = r["kelly"]
+        symbol = r["symbol"]
+        prob = edge["probability"]
+        edge_val = kelly["edge"]
+        signal = edge["signal"]
+
+        # Edge quality label
+        if edge_val > 0.3:
+            edge_label = "Strong"
+        elif edge_val > 0.1:
+            edge_label = "Moderate"
+        elif edge_val > 0:
+            edge_label = "Weak"
+        else:
+            edge_label = "No Edge"
+
+        lines.append(f"--- {symbol} ---")
+        lines.append(f"Signal: {signal}")
+        lines.append(f"Probability (p): {prob:.2f}")
+
+        if edge.get("fair_price_estimate") and edge["fair_price_estimate"] > 0:
+            lines.append(f"Fair Price Est.: ${edge['fair_price_estimate']:,.2f}")
+
+        lines.append(f"Edge: {edge_val:+.4f} ({edge_label})")
+
+        if kelly["signal_valid"]:
+            lines.append(f"Kelly (Quarter): {kelly['kelly_pct_str']}")
+            valid_signals += 1
+        else:
+            lines.append(f"Kelly: N/A (p < 0.60 or negative edge)")
+
+        lines.append(f"Reasoning: {edge['reasoning']}")
+
+        if not edge.get("parse_success", True):
+            lines.append("[Warning: JSON parse used fallback]")
+
+        lines.append("")
+
+    # Summary
+    lines.append(f"{'=' * 30}")
+    lines.append(f"Actionable signals: {valid_signals}/{len(results)}")
+    lines.append(f"Virtual cost: ${VIRTUAL_COST_PER_CALL:.2f}/call")
+    lines.append(f"Session: ${ledger['total_cost']:.2f} ({ledger['call_count']} calls)")
+    lines.append(f"{'=' * 30}")
+
+    return "\n".join(lines)
+
+
 def blocking_scan(mode="all", specific_pair=None):
     """Blocking scan function"""
     global last_scan_time, df_cache
@@ -680,7 +995,34 @@ def blocking_scan(mode="all", specific_pair=None):
                 break
         chart_path = generate_chart_image(df_cache[recommended_pair], recommended_pair, pattern_name)
 
-    return header + result, chart_path
+    # Quick edge assessment for recommended pair
+    edge_section = ""
+    if recommended_pair:
+        rec_analysis = None
+        source_data = all_data if not specific_pair else [analysis]
+        for d in source_data:
+            if d["symbol"] == recommended_pair:
+                rec_analysis = d
+                break
+        if rec_analysis:
+            try:
+                edge_prompt = build_edge_prompt(rec_analysis)
+                edge_resp = ask_deepseek_edge(edge_prompt)
+                if edge_resp:
+                    kelly = calculate_kelly_and_edge(edge_resp["probability"])
+                    edge_section = (
+                        f"\n{'=' * 30}\n"
+                        f"EDGE ASSESSMENT\n"
+                        f"p={edge_resp['probability']:.2f} | "
+                        f"Edge={kelly['edge']:+.4f} | "
+                        f"Kelly(1/4)={kelly['kelly_pct_str']}\n"
+                        f"Signal: {edge_resp['signal']}\n"
+                        f"{'=' * 30}"
+                    )
+            except Exception as e:
+                logger.error(f"Edge in scan failed: {e}")
+
+    return header + result + edge_section, chart_path
 
 
 async def run_scan(mode="all", specific_pair=None):
@@ -734,13 +1076,18 @@ async def send_with_chart(chat_id, text, chart_path):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.reply(
-        "🤖 SCALP SCANNER BOT\n\n"
+        "🤖 SCALP SCANNER BOT v2.2\n\n"
         "📊 SCANNING:\n"
         "/scan - Full market scan (top 30)\n"
         "/scan BTC - Deep scan single pair\n"
         "/scan meme - Volatile pairs only\n"
         "/top - Quick top 10 movers\n"
         "/autoscan on/off - Auto-scan every 15 min\n\n"
+        "📐 EDGE ASSESSMENT:\n"
+        "/edge - Risk assessment (top 5 pairs)\n"
+        "/edge BTC - Edge for single pair\n"
+        "/ledger - Virtual cost tracker\n"
+        "/ledger reset - Reset cost ledger\n\n"
         "💬 DEEPSEEK CHAT:\n"
         "/ask <question> - Chat with DeepSeek AI\n"
         "/clear - Clear chat history\n\n"
@@ -995,6 +1342,111 @@ async def cmd_resetprompt(message: types.Message):
     await message.reply("✅ Custom instructions removed. Using default scan prompt.")
 
 
+# ============================================
+# EDGE ASSESSMENT COMMANDS
+# ============================================
+
+@dp.message(Command("edge"))
+async def cmd_edge(message: types.Message, command: CommandObject):
+    """Run edge assessment on market pairs"""
+    global is_edge_scanning
+
+    if is_edge_scanning:
+        await message.reply("Edge scan already running, please wait...")
+        return
+
+    args = (command.args or "").strip()
+    specific_pair = args if args else None
+
+    if specific_pair:
+        await message.reply(f"Analyzing edge for {args.upper()}... ~15 seconds")
+    else:
+        await message.reply("Running edge assessment on top 5 pairs... ~60 seconds")
+
+    is_edge_scanning = True
+    try:
+        loop = asyncio.get_event_loop()
+        if specific_pair:
+            results = await loop.run_in_executor(
+                executor, lambda: blocking_edge_scan(specific_pair=specific_pair)
+            )
+        else:
+            results = await loop.run_in_executor(
+                executor, lambda: blocking_edge_scan()
+            )
+
+        # Record virtual cost for each successful API call
+        for r in results:
+            if "error" not in r:
+                record_virtual_cost(message.chat.id)
+
+        output = format_edge_results(results, message.chat.id)
+
+        # Send in chunks if needed
+        chunks = [output[i:i+4000] for i in range(0, len(output), 4000)]
+        for chunk in chunks:
+            await message.reply(chunk)
+            await asyncio.sleep(0.3)
+
+        # Send chart for the top-edge pair
+        top_edge = None
+        valid_results = [r for r in results if "error" not in r]
+        if valid_results:
+            top_edge = max(valid_results, key=lambda r: r["kelly"]["edge"])
+
+        if top_edge and top_edge["symbol"] in df_cache:
+            pattern = top_edge["analysis"].get("chart_pattern", "")
+            chart_path = generate_chart_image(
+                df_cache[top_edge["symbol"]], top_edge["symbol"], pattern
+            )
+            if chart_path:
+                photo = FSInputFile(chart_path)
+                await bot.send_photo(
+                    chat_id=message.chat.id,
+                    photo=photo,
+                    caption=f"{top_edge['symbol']} | Edge: {top_edge['kelly']['edge']:+.4f}"
+                )
+                os.remove(chart_path)
+
+    except Exception as e:
+        logger.error(f"Edge scan error: {e}")
+        await message.reply(f"Edge assessment failed: {e}")
+    finally:
+        is_edge_scanning = False
+
+
+@dp.message(Command("ledger"))
+async def cmd_ledger(message: types.Message, command: CommandObject):
+    """View or reset the virtual cost ledger"""
+    args = (command.args or "").strip().lower()
+
+    if args == "reset":
+        virtual_ledger.pop(message.chat.id, None)
+        await message.reply("Ledger reset to $0.00")
+        return
+
+    ledger = virtual_ledger.get(message.chat.id, {
+        "total_cost": 0.0, "call_count": 0, "session_start": "N/A"
+    })
+
+    session_start = ledger["session_start"]
+    if session_start != "N/A":
+        session_start = session_start[:19]
+
+    msg = (
+        f"{'=' * 25}\n"
+        f"VIRTUAL COST LEDGER\n"
+        f"{'=' * 25}\n"
+        f"Session start: {session_start}\n"
+        f"Total calls: {ledger['call_count']}\n"
+        f"Cost per call: ${VIRTUAL_COST_PER_CALL:.2f}\n"
+        f"Total cost: ${ledger['total_cost']:.2f}\n"
+        f"{'=' * 25}\n"
+        f"\nUse /ledger reset to clear"
+    )
+    await message.reply(msg)
+
+
 @dp.edited_message()
 async def handle_edited(message: types.Message):
     """Handle edited messages as if they were new"""
@@ -1088,9 +1540,10 @@ async def main():
     scheduler.start()
 
     print("=" * 50)
-    print("TELEGRAM SCALP SCANNER BOT v2.1")
-    print("With: Chart Patterns + Leverage + Chart Images")
+    print("TELEGRAM SCALP SCANNER BOT v2.2")
+    print("With: Chart Patterns + Leverage + Charts + Edge Assessment")
     print("Commands: scan, top, status, autoscan, leverage")
+    print("Edge: edge, ledger")
     print("DeepSeek: ask, clear, prompt, resetprompt")
     print(f"Handlers registered: {len(dp.message.handlers)}")
     print(f"Middleware registered: {len(dp.update.outer_middleware._middlewares) if hasattr(dp.update.outer_middleware, '_middlewares') else 'unknown'}")

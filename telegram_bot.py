@@ -85,22 +85,16 @@ df_cache = {}  # Cache dataframes for chart generation
 
 
 def get_exchange():
-    """Initialize Binance connection via non-US hostname"""
+    """Initialize Binance connection"""
     config = {
         "enableRateLimit": True,
         "timeout": 30000,
-        "hostname": "api.binance.me",
         "options": {
             "defaultType": "spot",
             "fetchCurrencies": False,
         }
     }
-    ex = ccxt.binance(config)
-    # Force all API URLs to use binance.me instead of binance.com
-    for key in ex.urls.get("api", {}):
-        if isinstance(ex.urls["api"][key], str):
-            ex.urls["api"][key] = ex.urls["api"][key].replace("binance.com", "binance.me")
-    return ex
+    return ccxt.binance(config)
 
 
 exchange = get_exchange()
